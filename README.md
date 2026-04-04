@@ -5,26 +5,30 @@ The entire setup is contained in a single MEL file for quick integration into ex
 
 ## Description
 
-A MEL-based Yaw / Pitch / Roll driver for Autodesk Maya.
-
-The entire setup is contained in a single MEL file, so it can be sourced and applied immediately without plugin compilation or additional dependencies.
 This tool derives stable yaw / pitch / roll style driver values from quaternion-based bend-twist decomposition for practical rigging workflows.
 
 ## Why not use raw Euler channels?
 
 Using raw Euler rotation channels directly as driver values can be unreliable.
 
-Euler values are affected by rotate order, axis coupling, and discontinuities near singularities ... so `rotateX`, `rotateY`, and `rotateZ` do not always behave as stable semantic driver channels.
+Euler values are affected by rotate order, axis coupling, and discontinuities near singularities,
+...so `rotateX`, `rotateY`, and `rotateZ` do not always behave as stable semantic driver channels.
 
 This can make corrective shapes, helper joints, and set-driven-key setups difficult to tune and maintain.
 
 ## Internal behavior
 
 * The driver reads `rotateX`, `rotateY`, `rotateZ`, and `rotateOrder` from the target node.
-* Internally, roll is extracted as twist around the specified twist axis.
-* Yaw and pitch are derived from the bend component in exponential-map space.
-* The yaw reference vector does not need to be perfectly orthogonal to the twist axis, because it is orthogonalized internally.
-* This tool assumes a meaningful twist axis and bend reference direction are provided.
+* Roll is extracted as twist around the given twist axis.
+* Yaw and pitch are reconstructed from the bend component in exponential-map space.
+* The yaw reference vector is orthogonalized internally, so exact orthogonality is not required.
+* A meaningful twist axis and bend reference direction are assumed.
+
+## Disclaimer
+
+This tool is provided as a **personal development project** and **has not undergone full production-level validation**.
+
+Although intended for practical rigging use, it should be tested carefully in your own pipeline and asset conditions before production deployment.
 
 ## Usage
 
@@ -36,7 +40,7 @@ source "yprExpressionDriver.mel";
 
 ### Quick start
 
-Install the driver using the default axis setup:
+Create the driver using the default axis setup:
 
 ```mel
 yprCreateExpressionDriverDefault("joint1");
@@ -101,10 +105,10 @@ After installation, the target node will output three driven values:
 
 These values can be used for:
 
-* corrective shapes
-* helper joints
-* set driven key inputs
-* internal rig logic
+* Corrective Shapes
+* Helper Joints
+* Set Driven Key Inputs
+* Internal Rig Logic
 
 ## References
 https://www.3dgep.com/understanding-quaternions/#Multiplying_a_Quaternion_by_a_Scalar
