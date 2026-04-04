@@ -30,6 +30,12 @@ This tool is provided as a **personal development project** and **has not underg
 
 Although intended for practical rigging use, it should be tested carefully in your own pipeline and asset conditions before production deployment.
 
+## Setup
+
+Place `yprExpressionDriver.mel` and `userSetup.mel` in a directory included in `MAYA_SCRIPT_PATH` (for example `~/maya/scripts/`).
+
+This allows Maya to load the required MEL procedures automatically at startup before expression evaluation.
+
 ## Usage
 
 ### Load the script
