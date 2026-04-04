@@ -1,0 +1,449 @@
+// yprExpressionDriver.mel
+/*
+Bend-Twist based Yaw / Pitch / Roll expression driver for Autodesk Maya
+
+Public API:
+    yprCreateExpressionDriver(
+        string $target,
+        float $rollAxisX, float $rollAxisY, float $rollAxisZ,
+        float $yawVectorX, float $yawVectorY, float $yawVectorZ,
+        string $yawOutAttr, string $pitchOutAttr, string $rollOutAttr
+   );
+
+    // or using default values
+    yprCreateExpressionDriverDefault(string $target);
+
+Notes:
+    - Reads target.rotateX/Y/Z and target.rotateOrder
+    - Computes bend-twist decomposition in quaternion / exponential-map space
+    - Writes target.<yawOutAttr>, target.<pitchOutAttr>, target.<rollOutAttr>
+*/
+
+
+global proc float yprRadiansToDegrees(float $radianValue){
+    return $radianValue * 57.29577951308232;
+}
+
+global proc vector yprNormalizeVectorSafe(vector $value, float $epsilon){
+    float $length = sqrt(
+        $value.x * $value.x +
+        $value.y * $value.y +
+        $value.z * $value.z
+    );
+    if ($length > $epsilon){
+        return <<
+            $value.x / $length,
+            $value.y / $length,
+            $value.z / $length
+        >>;
+    }
+    return <<0.0, 0.0, 0.0>>;
+}
+
+global proc float yprDotVector3(
+    float $ax, float $ay, float $az,
+    float $bx, float $by, float $bz
+){
+    return $ax * $bx + $ay * $by + $az * $bz;
+}
+
+global proc vector yprCrossVector(vector $a, vector $b){
+    return <<
+        $a.y * $b.z - $a.z * $b.y,
+        $a.z * $b.x - $a.x * $b.z,
+        $a.x * $b.y - $a.y * $b.x
+    >>;
+}
+
+global proc vector yprOrthogonalizeYawAxis(
+    vector $yawVector,
+    vector $twistAxis,
+    float $epsilon
+){
+    float $dotValue = yprDotVector3(
+        $yawVector.x, $yawVector.y, $yawVector.z,
+        $twistAxis.x, $twistAxis.y, $twistAxis.z
+    );
+
+    vector $yawOrtho = <<
+        $yawVector.x - $twistAxis.x * $dotValue,
+        $yawVector.y - $twistAxis.y * $dotValue,
+        $yawVector.z - $twistAxis.z * $dotValue
+    >>;
+
+    vector $yawAxis = yprNormalizeVectorSafe($yawOrtho, $epsilon);
+
+    if (
+        abs($yawAxis.x) <= $epsilon &&
+        abs($yawAxis.y) <= $epsilon &&
+        abs($yawAxis.z) <= $epsilon
+    ){
+        vector $fallback = <<0.0, 0.0, 1.0>>;
+        if (abs($twistAxis.z) > 0.9){
+            $fallback = <<0.0, 1.0, 0.0>>;
+        }
+
+        float $dotFallback = yprDotVector3(
+            $fallback.x, $fallback.y, $fallback.z,
+            $twistAxis.x, $twistAxis.y, $twistAxis.z
+        );
+
+        $yawOrtho = <<
+            $fallback.x - $twistAxis.x * $dotFallback,
+            $fallback.y - $twistAxis.y * $dotFallback,
+            $fallback.z - $twistAxis.z * $dotFallback
+        >>;
+
+        $yawAxis = yprNormalizeVectorSafe($yawOrtho, $epsilon);
+    }
+
+    return $yawAxis;
+}
+
+global proc float[] yprQuatNormalizeXYZW(float $q[]){
+    float $out[] = {0.0, 0.0, 0.0, 1.0};
+    float $length = sqrt(
+        $q[0] * $q[0] +
+        $q[1] * $q[1] +
+        $q[2] * $q[2] +
+        $q[3] * $q[3]
+    );
+    if ($length > 1e-8){
+        $out[0] = $q[0] / $length;
+        $out[1] = $q[1] / $length;
+        $out[2] = $q[2] / $length;
+        $out[3] = $q[3] / $length;
+    }
+    return $out;
+}
+
+global proc float[] yprQuatInvertXYZW(float $q[]){
+    float $out[] = {0.0, 0.0, 0.0, 1.0};
+    float $lengthSq =
+        $q[0] * $q[0] +
+        $q[1] * $q[1] +
+        $q[2] * $q[2] +
+        $q[3] * $q[3];
+    if ($lengthSq > 1e-8){
+        $out[0] = -$q[0] / $lengthSq;
+        $out[1] = -$q[1] / $lengthSq;
+        $out[2] = -$q[2] / $lengthSq;
+        $out[3] =  $q[3] / $lengthSq;
+    }
+    return $out;
+}
+
+global proc float[] yprQuatMultiplyXYZW(float $a[], float $b[]){
+    float $out[] = {0.0, 0.0, 0.0, 1.0};
+
+    float $ax = $a[0];
+    float $ay = $a[1];
+    float $az = $a[2];
+    float $aw = $a[3];
+
+    float $bx = $b[0];
+    float $by = $b[1];
+    float $bz = $b[2];
+    float $bw = $b[3];
+
+    $out[0] = $aw * $bx + $ax * $bw + $ay * $bz - $az * $by;
+    $out[1] = $aw * $by - $ax * $bz + $ay * $bw + $az * $bx;
+    $out[2] = $aw * $bz + $ax * $by - $ay * $bx + $az * $bw;
+    $out[3] = $aw * $bw - $ax * $bx - $ay * $by - $az * $bz;
+
+    return $out;
+}
+
+global proc float[] yprQuatHemisphereXYZW(float $q[]){
+    float $out[] = {$q[0], $q[1], $q[2], $q[3]};
+    if ($q[3] < 0.0){
+        $out[0] = -$q[0];
+        $out[1] = -$q[1];
+        $out[2] = -$q[2];
+        $out[3] = -$q[3];
+    }
+    return $out;
+}
+
+global proc float[] yprQuatToAxisAngleXYZW(float $q[]){
+    float $out[] = {1.0, 0.0, 0.0, 0.0};
+    float $vecLength = sqrt(
+        $q[0] * $q[0] +
+        $q[1] * $q[1] +
+        $q[2] * $q[2]
+    );
+
+    if ($vecLength > 1e-8){
+        $out[0] = $q[0] / $vecLength;
+        $out[1] = $q[1] / $vecLength;
+        $out[2] = $q[2] / $vecLength;
+        $out[3] = 2.0 * atan2($vecLength, $q[3]);
+    }
+
+    return $out;
+}
+
+global proc float[] yprQuatTwistProjectionXYZW(float $q[], vector $axis){
+    float $dotValue = yprDotVector3(
+        $q[0], $q[1], $q[2],
+        $axis.x, $axis.y, $axis.z
+    );
+
+    float $twistRaw[] = {
+        $axis.x * $dotValue,
+        $axis.y * $dotValue,
+        $axis.z * $dotValue,
+        $q[3]
+    };
+
+    return yprQuatNormalizeXYZW($twistRaw);
+}
+
+global proc float[] yprToQuaternion(float $roll, float $pitch, float $yaw, int $reversedEuler){
+    float $sin_r = sin($roll  * -0.5);
+    float $sin_p = sin($pitch * -0.5);
+    float $sin_y = sin($yaw   * -0.5);
+
+    float $cos_r = cos($roll  * -0.5);
+    float $cos_p = cos($pitch * -0.5);
+    float $cos_y = cos($yaw   * -0.5);
+
+    float $quat[];
+
+    if($reversedEuler)
+    {
+        $quat[0] = $sin_r * $cos_p * $cos_y - $cos_r * $sin_p * $sin_y;
+        $quat[1] = $cos_r * $sin_p * $cos_y + $sin_r * $cos_p * $sin_y;
+        $quat[2] = $cos_r * $cos_p * $sin_y - $sin_r * $sin_p * $cos_y;
+        $quat[3] = $cos_r * $cos_p * $cos_y + $sin_r * $sin_p * $sin_y;
+    }
+    else
+    {
+        $quat[0] = $sin_r * $cos_p * $cos_y + $cos_r * $sin_p * $sin_y;
+        $quat[1] = $cos_r * $sin_p * $cos_y - $sin_r * $cos_p * $sin_y;
+        $quat[2] = $cos_r * $cos_p * $sin_y + $sin_r * $sin_p * $cos_y;
+        $quat[3] = $cos_r * $cos_p * $cos_y - $sin_r * $sin_p * $sin_y;
+    }
+
+    return $quat;
+}
+
+global proc float[] yprEulerToQuaternion(int $rotateOrder, vector $rot, int $radian){
+    float $q[];
+
+    if(!$radian){
+        $rot = <<
+            $rot.x * 0.0174532925199433,
+            $rot.y * 0.0174532925199433,
+            $rot.z * 0.0174532925199433
+        >>;
+    }
+
+    switch($rotateOrder)
+    {
+        case 0:  // XYZ
+            $q = yprToQuaternion($rot.x, $rot.y, $rot.z, false);
+            break;
+
+        case 1:  // YZX
+            $q = yprToQuaternion($rot.y, $rot.z, $rot.x, false);
+            $q = { $q[2], $q[0], $q[1], $q[3] };
+            break;
+
+        case 2:  // ZXY
+            $q = yprToQuaternion($rot.z, $rot.x, $rot.y, false);
+            $q = { $q[1], $q[2], $q[0], $q[3] };
+            break;
+
+        case 3:  // XZY
+            $q = yprToQuaternion($rot.x, $rot.z, $rot.y, true);
+            $q = { $q[0], $q[2], $q[1], $q[3] };
+            break;
+
+        case 4:  // YXZ
+            $q = yprToQuaternion($rot.y, $rot.x, $rot.z, true);
+            $q = { $q[1], $q[0], $q[2], $q[3] };
+            break;
+
+        case 5:  // ZYX
+            $q = yprToQuaternion($rot.z, $rot.y, $rot.x, true);
+            $q = { $q[2], $q[1], $q[0], $q[3] };
+            break;
+    }
+
+    return $q;
+}
+
+global proc float[] yprToExponentialMap(float $qx, float $qy, float $qz, float $qw)
+{
+    float $exp[] = {0, 0, 0};
+
+    float $len = sqrt($qx * $qx + $qy * $qy + $qz * $qz);
+    float $angle = 2 * atan2($len, $qw);
+
+    float $epsilon = 0.001;
+    float $factor;
+
+    if (abs($angle) > $epsilon && $len > 1e-8) {
+        $factor = $angle / $len;
+    } else {
+        $factor = 2.0;
+    }
+
+    $exp[0] = $factor * $qx;
+    $exp[1] = $factor * $qy;
+    $exp[2] = $factor * $qz;
+
+    return $exp;
+}
+
+
+proc _doubleAttr(string $node, string $attr, float $defaultValue, int $keyable)
+{
+    if (!`objExists $node`){
+        error("_doubleAttr: Node does not exist: " + $node);
+    }
+
+    if (!`attributeQuery -node $node -exists $attr`){
+        addAttr -ln $attr -at double -dv $defaultValue $node;
+    }
+
+    if ($keyable){
+        setAttr -e -keyable true ($node + "." + $attr);
+        setAttr -e -channelBox true ($node + "." + $attr);
+    }
+    else{
+        setAttr -e -keyable false ($node + "." + $attr);
+        setAttr -e -channelBox true ($node + "." + $attr);
+    }
+}
+
+proc _outputAttr(string $node, string $yawOutAttr, string $pitchOutAttr, string $rollOutAttr)
+{
+    _doubleAttr($node, $yawOutAttr, 0.0, 0);
+    _doubleAttr($node, $pitchOutAttr, 0.0, 0);
+    _doubleAttr($node, $rollOutAttr, 0.0, 0);
+}
+
+proc string defaultExpressionName(string $target)
+{
+    return ($target + "_yprExpressionDriver_EXP");
+}
+
+proc deleteExpressionIfExists(string $exprName)
+{
+    if (`objExists $exprName`){
+        delete $exprName;
+    }
+}
+
+proc string buildExpressionBody(
+    string $target,
+    float $rollAxisX, float $rollAxisY, float $rollAxisZ,
+    float $yawVectorX, float $yawVectorY, float $yawVectorZ,
+    string $yawOutAttr, string $pitchOutAttr, string $rollOutAttr
+)
+{
+    string $body = "";
+
+    $body += "float $rotateX = " + $target + ".rotateX;\n";
+    $body += "float $rotateY = " + $target + ".rotateY;\n";
+    $body += "float $rotateZ = " + $target + ".rotateZ;\n";
+    $body += "int $rotateOrder = " + $target + ".rotateOrder;\n";
+    $body += "vector $vec = << $rotateX, $rotateY, $rotateZ >>;\n";
+    $body += "float $quartd[] = yprEulerToQuaternion($rotateOrder, $vec, 0);\n";
+    $body += "float $sourceQuat[] = {\n";
+    $body += "    -$quartd[0], -$quartd[1], -$quartd[2], $quartd[3]\n";
+    $body += "};\n";
+    $body += "\n";
+    $body += "vector $twistAxis = << " + $rollAxisX + ", " + $rollAxisY + ", " + $rollAxisZ + " >>;\n";
+    $body += "vector $yawVector = << " + $yawVectorX + ", " + $yawVectorY + ", " + $yawVectorZ + " >>;\n";
+    $body += "vector $twistAxisN = yprNormalizeVectorSafe($twistAxis, 1e-8);\n";
+    $body += "vector $yawAxis = yprOrthogonalizeYawAxis($yawVector, $twistAxisN, 1e-8);\n";
+    $body += "vector $pitchAxis = yprNormalizeVectorSafe(yprCrossVector($twistAxisN, $yawAxis), 1e-8);\n";
+    $body += "\n";
+    $body += "float $twistQuat[] = yprQuatTwistProjectionXYZW($sourceQuat, $twistAxisN);\n";
+    $body += "float $twistQuatHemi[] = yprQuatHemisphereXYZW($twistQuat);\n";
+    $body += "float $twistAA[] = yprQuatToAxisAngleXYZW($twistQuatHemi);\n";
+    $body += "float $twistInv[] = yprQuatInvertXYZW($twistQuat);\n";
+    $body += "float $bendQuat[] = yprQuatMultiplyXYZW($sourceQuat, $twistInv);\n";
+    $body += "float $bendExp[] = yprToExponentialMap(\n";
+    $body += "    $bendQuat[0], $bendQuat[1], $bendQuat[2], $bendQuat[3]\n";
+    $body += ");\n";
+    $body += "\n";
+    $body += "float $rollSign = (\n";
+    $body += "    yprDotVector3(\n";
+    $body += "        $twistAA[0], $twistAA[1], $twistAA[2],\n";
+    $body += "        $twistAxisN.x, $twistAxisN.y, $twistAxisN.z\n";
+    $body += "    ) > 0.0 ? 1.0 : -1.0\n";
+    $body += ");\n";
+    $body += "float $outRoll = yprRadiansToDegrees($twistAA[3] * $rollSign);\n";
+    $body += "float $outYaw = yprRadiansToDegrees(\n";
+    $body += "    yprDotVector3(\n";
+    $body += "        $bendExp[0], $bendExp[1], $bendExp[2],\n";
+    $body += "        $yawAxis.x, $yawAxis.y, $yawAxis.z\n";
+    $body += "    )\n";
+    $body += ");\n";
+    $body += "float $outPitch = yprRadiansToDegrees(\n";
+    $body += "    yprDotVector3(\n";
+    $body += "        $bendExp[0], $bendExp[1], $bendExp[2],\n";
+    $body += "        $pitchAxis.x, $pitchAxis.y, $pitchAxis.z\n";
+    $body += "    )\n";
+    $body += ");\n";
+    $body += "\n";
+    $body += $target + "." + $yawOutAttr + " = $outYaw;\n";
+    $body += $target + "." + $pitchOutAttr + " = $outPitch;\n";
+    $body += $target + "." + $rollOutAttr + " = $outRoll;\n";
+
+    return $body;
+}
+
+
+// Public API
+
+global proc string yprCreateExpressionDriver(
+    string $target,
+    float $rollAxisX, float $rollAxisY, float $rollAxisZ,
+    float $yawVectorX, float $yawVectorY, float $yawVectorZ,
+    string $yawOutAttr, string $pitchOutAttr, string $rollOutAttr
+)
+{
+    if (!`objExists $target`){
+        error("yprCreateExpressionDriver: Target does not exist: " + $target);
+    }
+
+    _outputAttr($target, $yawOutAttr, $pitchOutAttr, $rollOutAttr);
+
+    string $exprName = defaultExpressionName($target);
+    deleteExpressionIfExists($exprName);
+
+    string $body = buildExpressionBody(
+        $target,
+        $rollAxisX, $rollAxisY, $rollAxisZ,
+        $yawVectorX, $yawVectorY, $yawVectorZ,
+        $yawOutAttr, $pitchOutAttr, $rollOutAttr
+    );
+
+    expression
+        -n $exprName
+        -o $target
+        -ae 0
+        -uc all
+        -s $body;
+
+    return $exprName;
+}
+
+global proc string yprCreateExpressionDriverDefault(string $target)
+{
+    // Default assumption:
+    // - roll/twist axis = X
+    // - yaw reference vector = Y
+    // - outputs = yaw / pitch / roll
+    return yprCreateExpressionDriver(
+        $target,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        "yaw", "pitch", "roll"
+    );
+}
