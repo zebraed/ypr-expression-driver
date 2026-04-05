@@ -7,9 +7,9 @@ The entire setup is contained in a single MEL file for quick integration into ex
 
 This tool derives stable yaw / pitch / roll style driver values from quaternion-based bend-twist decomposition for practical rigging workflows.
 
-## Why not use raw Euler channels?
+## Why not use raw Euler attributes as drivers?
 
-Using raw Euler rotation channels directly as driver values can be unreliable.
+Using raw Euler rotation attributes directly as driver values can be unreliable.
 
 Euler values are affected by rotate order, axis coupling, and discontinuities near singularities,
 ...so `rotateX`, `rotateY`, and `rotateZ` do not always behave as stable semantic driver channels.
