@@ -30,6 +30,8 @@ This tool is provided as a **personal development project** and **has not underg
 
 Although intended for practical rigging use, it should be tested carefully in your own pipeline and asset conditions before production deployment.
 
+And, this is an experimental implementation in MEL. Considering performance and usability, creating a custom C++ plugin is the best approach.
+
 ## Setup
 
 Place `yprExpressionDriver.mel` and `userSetup.mel` in a directory included in `MAYA_SCRIPT_PATH` (for example `~/maya/scripts/`).
