@@ -129,3 +129,7 @@ https://www.youtube.com/watch?v=zjMuIxRvygQ
 
 Thank you my friend.<br>
 https://github.com/perseusrigging/perseus
+
+## License
+
+[MIT License](LICENSE)
